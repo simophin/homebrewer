@@ -1,0 +1,24 @@
+[shell]
+userPaths = []
+hook = """
+echo hello, world
+"""
+
+[scripts]
+runA = """
+"""
+
+[env]
+COMPOSE_PROJECT = "123"
+
+[dependencies]
+postgresql = "12"
+opensearch = "latest"
+openssl = "1.1"
+redis = "latest"
+
+[services.postgresql]
+path = "{pkg.postgresql}/bin/postgresql"
+
+[services.redis]
+path = "{pkg.redis}/bin/redis-server"
