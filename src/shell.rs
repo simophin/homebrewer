@@ -1,14 +1,73 @@
 use crate::model::ProjectEnvironment;
-use anyhow::Context;
+use anyhow::{bail, Context};
+use std::ffi::OsStr;
+use std::io::Write;
+use std::process::Stdio;
+use tempfile::NamedTempFile;
+use tokio::process::Command;
 
 impl ProjectEnvironment {
-    pub fn apply_current(&self) -> anyhow::Result<()> {
+    pub fn run_command(&self, prog: impl AsRef<OsStr>, apply_user: bool) -> Command {
+        let mut process = Command::new(prog);
         for (name, value) in &self.environ {
             let value = format!("{value}:{}", std::env::var(name).unwrap_or_default());
-            std::env::set_var(name, value);
+            process.env(name, &value);
         }
 
-        std::fs::create_dir_all(&self.state_dir).context("Creating state dirs")?;
+        if apply_user {
+            for (name, value) in &self.user_environ {
+                let value = format!("{value}:{}", std::env::var(name).unwrap_or_default());
+                process.env(name, &value);
+            }
+        }
+        process
+    }
+
+    pub async fn run_shell(&self) -> anyhow::Result<()> {
+        // Write init script to temp
+        if let Some(shell_hook) = &self.shell_hook {
+            let mut file = NamedTempFile::new().context("creating init script file")?;
+            file.write_all(shell_hook.as_bytes())
+                .context("writing script file")?;
+            let _ = file.flush();
+            let (_, file_path) = file.keep().context("keeping temporary file")?;
+
+            println!("Using init file {}", file_path.display());
+
+            let status = self
+                .run_command("bash", true)
+                .arg("--rcfile")
+                .arg(file_path.to_str().unwrap_or_default())
+                .arg("-i")
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .context("spawning shell")?
+                .wait()
+                .await
+                .context("wait for output")?;
+
+            if !status.success() {
+                bail!("failed running bash")
+            }
+        } else {
+            let status = self
+                .run_command("bash", true)
+                .arg("-i")
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .context("spawning shell")?
+                .wait()
+                .await
+                .context("wait for output")?;
+
+            if !status.success() {
+                bail!("failed running bash")
+            }
+        }
 
         Ok(())
     }

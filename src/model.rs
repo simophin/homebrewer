@@ -4,9 +4,7 @@ use indexmap::IndexMap;
 use maplit::hashmap;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
-use std::fmt::{format, Display, Formatter};
-use std::fs::{read_dir, ReadDir};
-use std::hash::Hash;
+use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -52,9 +50,7 @@ pub struct ShellConfig {
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceConfig {
-    pub path: TemplatedString,
-    pub args: Option<Vec<TemplatedString>>,
-    pub init_script: Option<TemplatedString>,
+    pub script: TemplatedString,
     pub env: Option<HashMap<String, TemplatedString>>,
 }
 
@@ -65,37 +61,37 @@ pub struct ProjectDesc {
     pub env: Option<HashMap<String, TemplatedString>>,
     pub services: Option<HashMap<String, ServiceConfig>>,
     pub scripts: Option<HashMap<String, TemplatedString>>,
+    pub var: Option<HashMap<String, String>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ServiceEnvironment {
-    pub program: String,
-    pub args: Vec<String>,
+    pub script: String,
     pub environ: HashMap<String, String>,
-    pub init_script: Option<String>,
+    pub working_directory: PathBuf,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProjectEnvironment {
     pub environ: HashMap<String, String>,
+    pub user_environ: HashMap<String, String>,
     pub scripts: HashMap<String, String>,
     pub services: HashMap<String, ServiceEnvironment>,
     pub shell_hook: Option<String>,
-    pub state_dir: String,
+    pub state_dir: PathBuf,
 }
 
 #[derive(Serialize)]
 struct RenderContext {
-    project_dir: String,
-    state_dir: String,
     pkg: HashMap<String, String>,
+    var: HashMap<String, String>,
 }
 
 impl ProjectDesc {
     pub fn to_environment(
         &self,
-        project_dir: impl AsRef<str>,
-        state_dir: impl AsRef<str>,
+        project_dir: impl AsRef<Path>,
+        state_dir: impl AsRef<Path>,
     ) -> anyhow::Result<ProjectEnvironment> {
         let prefix = Command::new("brew")
             .arg("--prefix")
@@ -155,8 +151,19 @@ impl ProjectDesc {
         }
 
         let render_context = RenderContext {
-            project_dir: project_dir.as_ref().to_string(),
-            state_dir: state_dir.as_ref().to_string(),
+            var: [
+                (
+                    String::from("project_dir"),
+                    project_dir.as_ref().to_str().unwrap().to_string(),
+                ),
+                (
+                    String::from("state_dir"),
+                    state_dir.as_ref().to_str().unwrap().to_string(),
+                ),
+            ]
+            .into_iter()
+            .chain(self.var.iter().flat_map(|m| m.clone().into_iter()))
+            .collect(),
             pkg: dependency_prefixes
                 .iter()
                 .filter_map(|(n, _, p)| p.to_str().map(|v| (n.to_string(), v.to_string())))
@@ -190,21 +197,24 @@ impl ProjectDesc {
             .collect::<Vec<_>>()
             .join(":");
 
-        let mut environ = hashmap! {
+        let environ = hashmap! {
             String::from("PATH") => path,
             String::from("LIBRARY_PATH") => lib_path,
             String::from("C_INCLUDE_PATH") => include_path.clone(),
             String::from("CPLUS_INCLUDE_PATH") => include_path,
         };
 
-        if let Some(env) = &self.env {
-            for (k, v) in env {
-                environ.insert(
-                    k.clone(),
-                    render_template(v, &render_context).context("rendering")?,
-                );
-            }
-        }
+        let user_environ = self
+            .env
+            .iter()
+            .flat_map(|m| m.iter())
+            .map(|(n, v)| {
+                (
+                    n.clone(),
+                    render_template(v, &render_context).expect("to render environment"),
+                )
+            })
+            .collect();
 
         let scripts = self
             .scripts
@@ -224,50 +234,30 @@ impl ProjectDesc {
             .as_ref()
             .iter()
             .flat_map(|v| v.iter())
-            .map(
-                |(
-                    name,
-                    ServiceConfig {
-                        path,
-                        args,
-                        init_script,
-                        env,
+            .map(|(name, ServiceConfig { script, env })| {
+                (
+                    name.clone(),
+                    ServiceEnvironment {
+                        environ: env
+                            .iter()
+                            .flat_map(|v| v.iter())
+                            .map(|(name, tpl)| {
+                                (
+                                    name.clone(),
+                                    render_template(tpl, &render_context).expect("to render env"),
+                                )
+                            })
+                            .collect(),
+                        script: render_template(script, &render_context).expect("to render script"),
+                        working_directory: Path::new(state_dir.as_ref()).join(&name),
                     },
-                )| {
-                    (
-                        name.clone(),
-                        ServiceEnvironment {
-                            program: render_template(path, &render_context)
-                                .expect("to render path"),
-                            args: args
-                                .iter()
-                                .flat_map(|v| v.iter())
-                                .map(|t| {
-                                    render_template(t, &render_context).expect("to render arg")
-                                })
-                                .collect(),
-                            environ: env
-                                .iter()
-                                .flat_map(|v| v.iter())
-                                .map(|(name, tpl)| {
-                                    (
-                                        name.clone(),
-                                        render_template(tpl, &render_context)
-                                            .expect("to render env"),
-                                    )
-                                })
-                                .collect(),
-                            init_script: init_script.as_ref().map(|t| {
-                                render_template(t, &render_context).expect("to render init script")
-                            }),
-                        },
-                    )
-                },
-            )
+                )
+            })
             .collect();
 
         Ok(ProjectEnvironment {
             environ,
+            user_environ,
             scripts,
             services,
             shell_hook: self
@@ -275,7 +265,7 @@ impl ProjectDesc {
                 .as_ref()
                 .and_then(|s| s.hook.as_ref())
                 .map(|t| render_template(t, &render_context).expect("to render hook")),
-            state_dir: state_dir.as_ref().to_string(),
+            state_dir: state_dir.as_ref().to_path_buf(),
         })
     }
 }

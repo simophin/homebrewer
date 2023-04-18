@@ -1,26 +1,16 @@
-// mod deps;
-use std::fs::{File, Permissions};
-use std::io::{Read, Write};
-use std::os::unix::prelude::PermissionsExt;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-use crate::model::ProjectDesc;
-use crate::run_as::run_as;
+use crate::model::{ProjectDesc, ProjectEnvironment};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use exec::execvp;
-use tempfile::NamedTempFile;
 
-mod install;
 mod model;
-mod run_as;
+mod run;
 mod ser;
+mod service;
 mod shell;
-
-async fn run() -> anyhow::Result<()> {
-    todo!()
-}
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -37,59 +27,55 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Shell,
+    Up,
+    Run { script_name: String },
 }
 
-fn main() -> anyhow::Result<()> {
+fn read_project(toml_file: impl AsRef<Path>) -> anyhow::Result<ProjectEnvironment> {
+    let toml_file = if toml_file.as_ref().is_relative() {
+        std::env::current_dir()
+            .context("getting current dir")?
+            .join(toml_file)
+    } else {
+        toml_file.as_ref().to_path_buf()
+    };
+
+    let mut file = File::open(&toml_file).context("Opening project file")?;
+    let mut file_contents = Default::default();
+    file.read_to_string(&mut file_contents)
+        .context("Reading file contents")?;
+    let project: ProjectDesc = toml::from_str(&file_contents).context("Parsing toml file")?;
+
+    let project_dir = toml_file.parent().context("Getting parent")?;
+
+    project
+        .to_environment(
+            project_dir.to_str().context("path to dir")?,
+            project_dir.join(".hb-state").to_str().unwrap_or_default(),
+        )
+        .context("environment")
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let Cli {
         command,
         path_to_toml,
     } = Cli::parse();
 
+    let info = read_project(&path_to_toml).context("reading project file")?;
+
     match command {
-        Commands::Shell => {
-            let mut file = File::open(&path_to_toml).context("Opening project file")?;
-            let mut file_contents = Default::default();
-            file.read_to_string(&mut file_contents)
-                .context("Reading file contents")?;
-            let project: ProjectDesc =
-                toml::from_str(&file_contents).context("Parsing toml file")?;
+        Commands::Shell => info.run_shell().await,
 
-            // println!("Got {project:#?}");
-
-            let project_dir = path_to_toml.parent().context("Getting parent")?;
-
-            let info = project
-                .to_environment(
-                    project_dir.to_str().context("path to dir")?,
-                    project_dir.join(".hb-state").to_str().unwrap_or_default(),
-                )
-                .expect("environment");
-
-            // println!("Got {info:#?}");
-            info.apply_current()
-                .context("applying current environment")?;
-
-            // Write init script to temp
-            let err = if let Some(shell_hook) = &info.shell_hook {
-                let mut file = NamedTempFile::new().context("creating init script file")?;
-                file.write_all(shell_hook.as_bytes())
-                    .context("writing script file")?;
-                let _ = file.flush();
-                file.as_file()
-                    .set_permissions(Permissions::from_mode(777))
-                    .context("setting init script permission")?;
-
-                let file_path = file.path().to_str().unwrap_or_default();
-                println!("Writing to {file_path}");
-
-                execvp("bash", &["--login", "--rcfile", file_path])
+        Commands::Up => {
+            if !info.services.is_empty() {
+                info.run_services().await
             } else {
-                execvp("bash", &["--login"])
-            };
-
-            println!("{}", err);
+                Ok(())
+            }
         }
-    }
 
-    Ok(())
+        Commands::Run { script_name } => info.run_script(&script_name).await,
+    }
 }
