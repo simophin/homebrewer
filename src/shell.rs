@@ -1,8 +1,8 @@
 use crate::model::ProjectEnvironment;
-use anyhow::{bail, Context};
+use anyhow::Context;
 use std::ffi::OsStr;
 use std::io::Write;
-use std::process::Stdio;
+use std::process::{exit, Stdio};
 use tempfile::NamedTempFile;
 use tokio::process::Command;
 
@@ -25,7 +25,7 @@ impl ProjectEnvironment {
 
     pub async fn run_shell(&self) -> anyhow::Result<()> {
         // Write init script to temp
-        if let Some(shell_hook) = &self.shell_hook {
+        let status = if let Some(shell_hook) = &self.shell_hook {
             let mut file = NamedTempFile::new().context("creating init script file")?;
             file.write_all(shell_hook.as_bytes())
                 .context("writing script file")?;
@@ -34,8 +34,7 @@ impl ProjectEnvironment {
 
             println!("Using init file {}", file_path.display());
 
-            let status = self
-                .run_command("bash", true)
+            self.run_command("bash", true)
                 .arg("--rcfile")
                 .arg(file_path.to_str().unwrap_or_default())
                 .arg("-i")
@@ -46,14 +45,9 @@ impl ProjectEnvironment {
                 .context("spawning shell")?
                 .wait()
                 .await
-                .context("wait for output")?;
-
-            if !status.success() {
-                bail!("failed running bash")
-            }
+                .context("wait for output")?
         } else {
-            let status = self
-                .run_command("bash", true)
+            self.run_command("bash", true)
                 .arg("-i")
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
@@ -62,13 +56,9 @@ impl ProjectEnvironment {
                 .context("spawning shell")?
                 .wait()
                 .await
-                .context("wait for output")?;
+                .context("wait for output")?
+        };
 
-            if !status.success() {
-                bail!("failed running bash")
-            }
-        }
-
-        Ok(())
+        exit(status.code().unwrap_or_default());
     }
 }

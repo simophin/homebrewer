@@ -64,14 +64,14 @@ pub struct ProjectDesc {
     pub var: Option<HashMap<String, String>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ServiceEnvironment {
     pub script: String,
     pub environ: HashMap<String, String>,
     pub working_directory: PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProjectEnvironment {
     pub environ: HashMap<String, String>,
     pub user_environ: HashMap<String, String>,
@@ -108,7 +108,7 @@ impl ProjectDesc {
         let prefix = std::str::from_utf8(&prefix.stdout)
             .context("getting prefix")?
             .trim();
-        println!("Using homebrew prefix {prefix}");
+        eprintln!("Using homebrew prefix {prefix}");
 
         let prefix = Path::new(prefix);
 

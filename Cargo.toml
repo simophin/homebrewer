@@ -1,5 +1,5 @@
 [package]
-name = "homebrewer"
+name = "brewer"
 version = "0.1.0"
 edition = "2021"
 

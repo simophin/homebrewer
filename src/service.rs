@@ -1,22 +1,36 @@
 use crate::model::ProjectEnvironment;
-use anyhow::Context;
+use anyhow::{bail, Context};
 use nix::libc::{kill, pid_t, SIGTERM};
 use std::os::unix::prelude::ExitStatusExt;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::select;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
+use tokio::{select, spawn};
 use tokio_util::sync::CancellationToken;
 
 impl ProjectEnvironment {
-    pub async fn run_services(&self) -> anyhow::Result<()> {
+    pub async fn run_services(&self, only: Option<Vec<String>>) -> anyhow::Result<()> {
         let cancel_token = CancellationToken::new();
         let mut js = JoinSet::new();
 
-        for (name, _) in &self.services {
-            js.spawn(self.clone().run_service(name.clone(), cancel_token.clone()));
+        if let Some(only) = only {
+            if let Some(service) = only
+                .iter()
+                .filter(|service| !self.services.contains_key(service.as_str()))
+                .next()
+            {
+                bail!("Service {service} does not exist")
+            }
+
+            for name in only {
+                js.spawn(self.clone().run_service(name.clone(), cancel_token.clone()));
+            }
+        } else {
+            for (name, _) in &self.services {
+                js.spawn(self.clone().run_service(name.clone(), cancel_token.clone()));
+            }
         }
 
         select! {
@@ -33,6 +47,31 @@ impl ProjectEnvironment {
         Ok(())
     }
 
+    async fn monitor_outputs(
+        name: String,
+        stdout: impl AsyncBufRead + Unpin + 'static,
+        stderr: impl AsyncBufRead + Unpin + 'static,
+    ) {
+        let mut stdout = stdout.lines();
+        let mut stderr = stderr.lines();
+
+        loop {
+            select! {
+                line = stdout.next_line() => {
+                    if let Ok(Some(line)) = line {
+                        println!("{name}: {line}");
+                    }
+                }
+
+                line = stderr.next_line() => {
+                    if let Ok(Some(line)) = line {
+                        eprintln!("{name}: {line}");
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn run_service(
         self,
         name: String,
@@ -46,7 +85,7 @@ impl ProjectEnvironment {
         std::fs::create_dir_all(&service.working_directory)
             .with_context(|| format!("Error creating state directory for service {name}"))?;
 
-        let mut cmd = self
+        let mut child = self
             .run_command("sh", false)
             .arg("-c")
             .arg(&service.script)
@@ -57,81 +96,45 @@ impl ProjectEnvironment {
             .spawn()
             .context("Spawning service")?;
 
-        let mut stdout = BufReader::new(cmd.stdout.take().context("taking out stdout")?).lines();
-        let mut stderr = BufReader::new(cmd.stderr.take().context("taking out stderr")?).lines();
-        let pid: pid_t = cmd
+        let stdout = BufReader::new(child.stdout.take().context("taking out stdout")?);
+        let stderr = BufReader::new(child.stderr.take().context("taking out stderr")?);
+        let log_monitor = spawn(Self::monitor_outputs(name.clone(), stdout, stderr));
+
+        let pid: pid_t = child
             .id()
             .context("getting child process id")?
             .try_into()
             .context("converting to pid")?;
 
         println!("Running service {name}");
-        let mut error = None;
 
-        loop {
-            select! {
-                _ = cancellation.cancelled() => {
-                    break;
-                }
+        let status: Option<ExitStatus> = select! {
+            _ = cancellation.cancelled() => None,
+            status = child.wait() => status.ok(),
+        };
 
-                _ = cmd.wait() => {
-                    break;
-                }
-
-                line = stdout.next_line() => {
-                    match line.context("reading line") {
-                        Ok(Some(line)) => {
-                            println!("{name}: {line}");
-                        }
-
-                        Ok(None) => continue,
-                        Err(e) => {
-                            error = Some(e);
-                            break;
-                        }
-                    }
-                }
-
-                line = stderr.next_line() => {
-                    match line.context("reading error line") {
-                        Ok(Some(line)) => {
-                            eprintln!("{name}: {line}");
-                        }
-
-                        Ok(None) => continue,
-                        Err(e) => {
-                            error = Some(e);
-                            break;
-                        }
-                    }
-                }
+        if status.is_none() {
+            println!("Terminating {name}");
+            unsafe {
+                kill(pid, SIGTERM);
             }
         }
 
-        if let Some(status) = cmd.try_wait().context("trying to wait for child")? {
-            return Ok(status);
-        }
-
         println!("Gracefully waiting for {name} to terminate");
-        unsafe {
-            kill(pid, SIGTERM);
-        }
 
-        let timeout_duration = Duration::from_secs(5);
-        match timeout(timeout_duration, cmd.wait()).await {
+        let timeout_duration = Duration::from_secs(10);
+        match timeout(timeout_duration, child.wait()).await {
             Err(_) => {
                 eprintln!("{name} doesn't respond within {timeout_duration:?}, killing...");
-                let _ = cmd.kill();
+                let _ = child.kill();
+                let _ = log_monitor.abort();
             }
 
             Ok(status) => {
                 println!("{name} exited with status {status:?}");
+                let _ = log_monitor.abort();
                 return status.context("waiting for termination");
             }
-        }
-
-        if let Some(err) = error {
-            return Err(err);
         }
 
         Ok(ExitStatus::from_raw(0))

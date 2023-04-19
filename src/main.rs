@@ -3,9 +3,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::model::{ProjectDesc, ProjectEnvironment};
-use anyhow::Context;
+use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
 
+mod init;
 mod model;
 mod run;
 mod ser;
@@ -26,9 +27,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Set up a new project
+    Init,
+
+    /// Spin up a shell with the environment set up
     Shell,
-    Up,
+
+    /// Bring up services
+    Up {
+        /// The services to bring up. Default to all services if empty.
+        service_names: Option<Vec<String>>,
+    },
+
+    /// Run a particular script
     Run { script_name: String },
+
+    /// Install the necessary dependencies
+    Install,
+
+    /// Print out the project information in json format
+    Info,
 }
 
 fn read_project(toml_file: impl AsRef<Path>) -> anyhow::Result<ProjectEnvironment> {
@@ -63,19 +81,54 @@ async fn main() -> anyhow::Result<()> {
         path_to_toml,
     } = Cli::parse();
 
-    let info = read_project(&path_to_toml).context("reading project file")?;
-
     match command {
-        Commands::Shell => info.run_shell().await,
+        Commands::Init => init::init_project(path_to_toml),
+        Commands::Shell => {
+            read_project(&path_to_toml)
+                .context("reading project file")?
+                .run_shell()
+                .await
+        }
 
-        Commands::Up => {
+        Commands::Up { service_names } => {
+            let info = read_project(&path_to_toml).context("reading project file")?;
             if !info.services.is_empty() {
-                info.run_services().await
+                info.run_services(service_names).await
             } else {
                 Ok(())
             }
         }
 
-        Commands::Run { script_name } => info.run_script(&script_name).await,
+        Commands::Run { script_name } => {
+            read_project(&path_to_toml)
+                .context("reading project file")?
+                .run_script(&script_name)
+                .await
+        }
+
+        Commands::Install => {
+            let status = read_project(&path_to_toml)
+                .context("reading project file")?
+                .run_command("sh", false)
+                .arg("-c")
+                .arg("echo All dependencies installed")
+                .spawn()
+                .context("Running install")?
+                .wait()
+                .await
+                .context("wait for sh to finish")?;
+
+            if !status.success() {
+                bail!("Unable to install dependencies")
+            }
+
+            Ok(())
+        }
+
+        Commands::Info => serde_json::to_writer_pretty(
+            std::io::stdout(),
+            &read_project(&path_to_toml).context("reading project file")?,
+        )
+        .context("writing json"),
     }
 }
