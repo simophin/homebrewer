@@ -14,44 +14,34 @@ concurrency:
 jobs:
   build_linux:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [aarch64-unknown-linux-musl, x86_64-unknown-linux-musl]
     steps:
     - uses: actions/checkout@v3
     - name: Install cross
       run: cargo install cross
     - name: Build
-      run: |
-        set -e
-        mkdir artifacts
-        for target in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
-          echo Building $target
-          cross build --release --target=$target && \
-            mv -v target/$target/release/brewer artifacts/brewer.$target
-        done
+      run: cross build --release --target=${{ matrix.target }}
     - name: Upload a Build Artifact
       uses: actions/upload-artifact@v3
       with:
-        name: artifacts-linux
-        path: artifacts
+        name: artifact-${{ matrix.target }}
+        path: target/${{ matrix.target }}/release/brewer
 
   build_apple:
     runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
     - uses: actions/checkout@v3
-    - name: Install rust targets
-      run: |
-        rustup target add aarch64-apple-darwin
-        rustup target add x86_64-apple-darwin
+    - name: Install rust target
+      run: rustup target add ${{ matrix.target }}
     - name: Build
-      run: |
-        set -e
-        mkdir artifacts
-        for target in aarch64-apple-darwin x86_64-apple-darwin; do
-          echo Building $target
-          cargo build --release --target=$target && \
-            mv -v target/$target/release/brewer artifacts/brewer.$target
-        done
+      run: cargo build --release --target=${{ matrix.target }}
     - name: Upload a Build Artifact
       uses: actions/upload-artifact@v3
       with:
-        name: artifacts-macos
-        path: artifacts
+        name: artifact-${{ matrix.target }}
+        path: target/${{ matrix.target }}/release/brewer
