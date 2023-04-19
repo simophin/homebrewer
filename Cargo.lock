@@ -70,29 +70,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
-name = "brewer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "derive_more",
- "exec",
- "futures",
- "indexmap",
- "itertools",
- "lazy_static",
- "maplit",
- "nix",
- "serde",
- "serde_json",
- "tempfile",
- "tinytemplate",
- "tokio",
- "tokio-util",
- "toml",
-]
-
-[[package]]
 name = "bytes"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -175,6 +152,29 @@ dependencies = [
  "quote",
  "rustc_version",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "devit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "derive_more",
+ "exec",
+ "futures",
+ "indexmap",
+ "itertools",
+ "lazy_static",
+ "maplit",
+ "nix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tinytemplate",
+ "tokio",
+ "tokio-util",
+ "toml",
 ]
 
 [[package]]

@@ -31,7 +31,11 @@ enum Commands {
     Init,
 
     /// Spin up a shell with the environment set up
-    Shell,
+    #[clap(trailing_var_arg=true)]
+    Shell {
+        /// The script to run, interactive shell if not given
+        script: Option<String>,
+    },
 
     /// Bring up services
     Up {
@@ -83,10 +87,10 @@ async fn main() -> anyhow::Result<()> {
 
     match command {
         Commands::Init => init::init_project(path_to_toml),
-        Commands::Shell => {
+        Commands::Shell { script } => {
             read_project(&path_to_toml)
                 .context("reading project file")?
-                .run_shell()
+                .run_shell(script)
                 .await
         }
 
@@ -129,6 +133,6 @@ async fn main() -> anyhow::Result<()> {
             std::io::stdout(),
             &read_project(&path_to_toml).context("reading project file")?,
         )
-        .context("writing json"),
+            .context("writing json"),
     }
 }

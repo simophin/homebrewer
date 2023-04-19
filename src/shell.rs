@@ -23,7 +23,20 @@ impl ProjectEnvironment {
         process
     }
 
-    pub async fn run_shell(&self) -> anyhow::Result<()> {
+    pub async fn run_shell(&self, command: Option<String>) -> anyhow::Result<()> {
+        let mut cmd = self.run_command("bash", true);
+
+        println!("Command is {command:?}");
+        if let Some(command) = command {
+            cmd.arg("-c").arg(command);
+        } else {
+            cmd.arg("-i");
+        }
+
+        cmd.stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
         // Write init script to temp
         let status = if let Some(shell_hook) = &self.shell_hook {
             let mut file = NamedTempFile::new().context("creating init script file")?;
@@ -34,25 +47,15 @@ impl ProjectEnvironment {
 
             println!("Using init file {}", file_path.display());
 
-            self.run_command("bash", true)
-                .arg("--rcfile")
+            cmd.arg("--rcfile")
                 .arg(file_path.to_str().unwrap_or_default())
-                .arg("-i")
-                .stdin(Stdio::inherit())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
                 .spawn()
                 .context("spawning shell")?
                 .wait()
                 .await
                 .context("wait for output")?
         } else {
-            self.run_command("bash", true)
-                .arg("-i")
-                .stdin(Stdio::inherit())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .spawn()
+            cmd.spawn()
                 .context("spawning shell")?
                 .wait()
                 .await
