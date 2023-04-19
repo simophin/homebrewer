@@ -23,3 +23,6 @@ maplit = "1"
 tempfile = "3"
 nix = "0"
 futures = "0"
+
+[profile.release]
+strip = true
