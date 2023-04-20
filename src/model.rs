@@ -1,43 +1,32 @@
-use anyhow::{bail, Context};
+use anyhow::Context;
 use derive_more::{Deref, Display};
 use indexmap::IndexMap;
 use maplit::hashmap;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{exit, Command};
+
+use crate::utils::brew_prefixes;
 
 #[derive(Debug, Display, Deserialize, Serialize, Eq, PartialEq, Deref)]
 pub struct TemplatedString(String);
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum VersionSpec {
-    Latest,
-    Versioned(String),
-}
+    // postgresql = "12"
+    // postgresql = "*"
+    // postgresql = ""
+    VersionOnly(String),
 
-impl Display for VersionSpec {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VersionSpec::Latest => Ok(()),
-            VersionSpec::Versioned(v) => f.write_fmt(format_args!("@{v}")),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for VersionSpec {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = <String as Deserialize<'_>>::deserialize(deserializer)?;
-        if s.eq_ignore_ascii_case("latest") {
-            Ok(Self::Latest)
-        } else {
-            Ok(Self::Versioned(s))
-        }
-    }
+    // elasticsearch = { name = "elastic/tap/elasticsearch-full" }
+    // elasticsearch = { name = "elastic/tap/elasticsearch-full", version = "*" }
+    Full {
+        name: String,
+        version: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -61,7 +50,7 @@ pub struct ProjectDesc {
     pub env: Option<HashMap<String, TemplatedString>>,
     pub services: Option<HashMap<String, ServiceConfig>>,
     pub scripts: Option<HashMap<String, TemplatedString>>,
-    pub var: Option<HashMap<String, String>>,
+    pub vars: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,119 +70,140 @@ pub struct ProjectEnvironment {
     pub state_dir: PathBuf,
 }
 
+#[derive(Serialize, Clone)]
+struct DependencyInfo {
+    name: String,
+    path: PathBuf,
+}
+
 #[derive(Serialize)]
 struct RenderContext {
-    pkg: HashMap<String, String>,
-    var: HashMap<String, String>,
+    state_dir: PathBuf,
+    project_dir: PathBuf,
+    pkgs: IndexMap<String, DependencyInfo>,
+    vars: IndexMap<String, String>,
+}
+
+impl VersionSpec {
+    pub fn to_brew_name<'a>(&'a self, key: &'a str) -> Cow<'a, str> {
+        match self {
+            VersionSpec::VersionOnly(s) if s.trim() == "*" || s.trim().is_empty() => {
+                Cow::Borrowed(key.trim())
+            }
+            VersionSpec::VersionOnly(s) => Cow::Owned(format!("{}@{}", key.trim(), s.trim())),
+            VersionSpec::Full {
+                name,
+                version: Some(version),
+            } if !version.trim().is_empty() => {
+                Cow::Owned(format!("{}@{}", name.trim(), version.trim()))
+            }
+            VersionSpec::Full { name, .. } => Cow::Borrowed(name.trim()),
+        }
+    }
 }
 
 impl ProjectDesc {
-    pub fn to_environment(
+    pub async fn to_environment(
         &self,
         project_dir: impl AsRef<Path>,
         state_dir: impl AsRef<Path>,
     ) -> anyhow::Result<ProjectEnvironment> {
-        let prefix = Command::new("brew")
-            .arg("--prefix")
-            .output()
-            .context("getting prefix")?;
+        let project_dir = project_dir.as_ref().to_path_buf();
+        let state_dir = state_dir.as_ref().to_path_buf();
 
-        if !prefix.status.success() {
-            bail!(
-                "Error getting prefix: {}",
-                std::str::from_utf8(&prefix.stderr).unwrap_or_default()
-            );
+        if project_dir.is_relative() {
+            panic!("Project dir can not be relative")
         }
 
-        let prefix = std::str::from_utf8(&prefix.stdout)
-            .context("getting prefix")?
-            .trim();
-        eprintln!("Using homebrew prefix {prefix}");
+        if state_dir.is_relative() {
+            panic!("State dir can not be relative")
+        }
 
-        let prefix = Path::new(prefix);
+        let pkgs: IndexMap<String, DependencyInfo> = brew_prefixes(
+            self.dependencies
+                .iter()
+                .map(|(key, spec)| spec.to_brew_name(key.as_str()).into_owned()),
+        )
+        .await
+        .context("getting brew prefixes")?
+        .into_iter()
+        .zip(self.dependencies.iter())
+        .map(|(prefix, (key, spec))| {
+            (
+                key.clone(),
+                DependencyInfo {
+                    name: spec.to_brew_name(key.as_str()).into_owned(),
+                    path: prefix.into(),
+                },
+            )
+        })
+        .collect();
 
-        let dependency_prefixes = self
-            .dependencies
-            .iter()
-            .map(|(k, v)| {
-                let name = format!("{k}{v}");
-                let p = prefix.join("opt").join(&name);
-                (k.clone(), name, p)
-            })
-            .collect::<Vec<_>>();
-
-        let to_install = dependency_prefixes
-            .iter()
-            .filter(|(_, _, p)| !p.exists())
-            .map(|(_, n, p)| {
-                println!("Prefix {p:?} doesn't exist");
-                n.clone()
+        let to_install = pkgs
+            .values()
+            .filter(|info| !Path::new(&info.path).exists())
+            .map(|info| {
+                println!("{} doesn't exist", &info.name);
+                info.name.as_str()
             })
             .collect::<Vec<_>>();
 
         if !to_install.is_empty() {
             println!("Installing {}", to_install.join(", "));
-            let mut cmd = Command::new("brew");
-            cmd.arg("install");
-            for i in to_install {
-                cmd.arg(i);
-            }
-
-            let output = cmd
+            let output = Command::new("brew")
+                .arg("install")
+                .args(to_install.iter())
                 .spawn()
                 .context("Running brew install")?
                 .wait_with_output()
                 .context("Waiting for brew install output")?;
 
             if !output.status.success() {
-                bail!("Failed installing missing dependencies");
+                exit(output.status.code().unwrap_or(-1));
             }
         }
 
         let render_context = RenderContext {
-            var: [
-                (
-                    String::from("project_dir"),
-                    project_dir.as_ref().to_str().unwrap().to_string(),
-                ),
-                (
-                    String::from("state_dir"),
-                    state_dir.as_ref().to_str().unwrap().to_string(),
-                ),
-            ]
-            .into_iter()
-            .chain(self.var.iter().flat_map(|m| m.clone().into_iter()))
-            .collect(),
-            pkg: dependency_prefixes
+            project_dir,
+            state_dir: state_dir.clone(),
+            vars: self
+                .vars
+                .as_ref()
                 .iter()
-                .filter_map(|(n, _, p)| p.to_str().map(|v| (n.to_string(), v.to_string())))
+                .flat_map(|s| s.iter())
+                .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            pkgs: pkgs.clone(),
         };
 
         let path = self
             .shell
             .as_ref()
             .and_then(|s| s.user_paths.as_ref())
-            .unwrap_or(&vec![])
             .iter()
+            .flat_map(|v| v.iter())
             .map(|t| render_template(t, &render_context).expect("To render"))
-            .chain(
-                dependency_prefixes
-                    .iter()
-                    .filter_map(|(_, _, p)| p.join("bin").to_str().map(|s| s.to_string())),
-            )
+            .chain(pkgs.iter().flat_map(|(_, info)| {
+                ["bin", "sbin"].iter().map(|sub| {
+                    info.path
+                        .join(sub)
+                        .to_str()
+                        .expect("path to string")
+                        .to_string()
+                })
+            }))
             .collect::<Vec<_>>()
             .join(":");
 
-        let lib_path = dependency_prefixes
+        let lib_path = pkgs
             .iter()
-            .filter_map(|(_, _, p)| p.join("lib").to_str().map(|s| s.to_string()))
+            .filter_map(|(_, p)| p.path.join("lib").to_str().map(|s| s.to_string()))
             .collect::<Vec<_>>()
             .join(":");
 
-        let include_path = dependency_prefixes
+        let include_path = pkgs
             .iter()
-            .filter_map(|(_, _, p)| p.join("include").to_str().map(|s| s.to_string()))
+            .filter_map(|(_, p)| p.path.join("include").to_str().map(|s| s.to_string()))
             .collect::<Vec<_>>()
             .join(":");
 
@@ -249,7 +259,7 @@ impl ProjectDesc {
                             })
                             .collect(),
                         script: render_template(script, &render_context).expect("to render script"),
-                        working_directory: Path::new(state_dir.as_ref()).join(&name),
+                        working_directory: state_dir.join(&name),
                     },
                 )
             })
@@ -265,7 +275,7 @@ impl ProjectDesc {
                 .as_ref()
                 .and_then(|s| s.hook.as_ref())
                 .map(|t| render_template(t, &render_context).expect("to render hook")),
-            state_dir: state_dir.as_ref().to_path_buf(),
+            state_dir,
         })
     }
 }

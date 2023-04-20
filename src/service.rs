@@ -86,7 +86,7 @@ impl ProjectEnvironment {
             .with_context(|| format!("Error creating state directory for service {name}"))?;
 
         let mut child = self
-            .run_command("sh", false)
+            .run_command("sh", true)
             .arg("-c")
             .arg(&service.script)
             .current_dir(&service.working_directory)

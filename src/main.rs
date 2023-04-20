@@ -12,6 +12,7 @@ mod run;
 mod ser;
 mod service;
 mod shell;
+mod utils;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -31,10 +32,10 @@ enum Commands {
     Init,
 
     /// Spin up a shell with the environment set up
-    #[clap(trailing_var_arg=true)]
+    #[clap(trailing_var_arg = true)]
     Shell {
         /// The script to run, interactive shell if not given
-        script: Option<String>,
+        args: Option<Vec<String>>,
     },
 
     /// Bring up services
@@ -53,7 +54,7 @@ enum Commands {
     Info,
 }
 
-fn read_project(toml_file: impl AsRef<Path>) -> anyhow::Result<ProjectEnvironment> {
+async fn read_project(toml_file: impl AsRef<Path>) -> anyhow::Result<ProjectEnvironment> {
     let toml_file = if toml_file.as_ref().is_relative() {
         std::env::current_dir()
             .context("getting current dir")?
@@ -75,6 +76,7 @@ fn read_project(toml_file: impl AsRef<Path>) -> anyhow::Result<ProjectEnvironmen
             project_dir.to_str().context("path to dir")?,
             project_dir.join(".hb-state").to_str().unwrap_or_default(),
         )
+        .await
         .context("environment")
 }
 
@@ -87,15 +89,18 @@ async fn main() -> anyhow::Result<()> {
 
     match command {
         Commands::Init => init::init_project(path_to_toml),
-        Commands::Shell { script } => {
+        Commands::Shell { args } => {
             read_project(&path_to_toml)
+                .await
                 .context("reading project file")?
-                .run_shell(script)
+                .run_shell(args.map(|args| args.join(" ")))
                 .await
         }
 
         Commands::Up { service_names } => {
-            let info = read_project(&path_to_toml).context("reading project file")?;
+            let info = read_project(&path_to_toml)
+                .await
+                .context("reading project file")?;
             if !info.services.is_empty() {
                 info.run_services(service_names).await
             } else {
@@ -105,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Run { script_name } => {
             read_project(&path_to_toml)
+                .await
                 .context("reading project file")?
                 .run_script(&script_name)
                 .await
@@ -112,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Install => {
             let status = read_project(&path_to_toml)
+                .await
                 .context("reading project file")?
                 .run_command("sh", false)
                 .arg("-c")
@@ -131,8 +138,10 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Info => serde_json::to_writer_pretty(
             std::io::stdout(),
-            &read_project(&path_to_toml).context("reading project file")?,
+            &read_project(&path_to_toml)
+                .await
+                .context("reading project file")?,
         )
-            .context("writing json"),
+        .context("writing json"),
     }
 }

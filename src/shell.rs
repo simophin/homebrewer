@@ -1,6 +1,7 @@
 use crate::model::ProjectEnvironment;
 use anyhow::Context;
 use std::ffi::OsStr;
+use std::fmt::Debug;
 use std::io::Write;
 use std::process::{exit, Stdio};
 use tempfile::NamedTempFile;
@@ -10,50 +11,62 @@ impl ProjectEnvironment {
     pub fn run_command(&self, prog: impl AsRef<OsStr>, apply_user: bool) -> Command {
         let mut process = Command::new(prog);
         for (name, value) in &self.environ {
-            let value = format!("{value}:{}", std::env::var(name).unwrap_or_default());
-            process.env(name, &value);
+            let existing = std::env::var(name).unwrap_or_default();
+            if existing.is_empty() {
+                process.env(name, &value);
+            } else {
+                process.env(name, format!("{value}:{existing}"));
+            }
         }
 
         if apply_user {
             for (name, value) in &self.user_environ {
-                let value = format!("{value}:{}", std::env::var(name).unwrap_or_default());
                 process.env(name, &value);
             }
         }
         process
     }
 
-    pub async fn run_shell(&self, command: Option<String>) -> anyhow::Result<()> {
+    pub async fn run_shell(&self, command: Option<impl AsRef<str> + Debug>) -> anyhow::Result<()> {
         let mut cmd = self.run_command("bash", true);
-
-        println!("Command is {command:?}");
-        if let Some(command) = command {
-            cmd.arg("-c").arg(command);
-        } else {
-            cmd.arg("-i");
-        }
 
         cmd.stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
 
-        // Write init script to temp
-        let status = if let Some(shell_hook) = &self.shell_hook {
-            let mut file = NamedTempFile::new().context("creating init script file")?;
-            file.write_all(shell_hook.as_bytes())
-                .context("writing script file")?;
-            let _ = file.flush();
-            let (_, file_path) = file.keep().context("keeping temporary file")?;
+        let status = if let Some(command) = command {
+            let command = format!(
+                "set -e\n {}\n {}",
+                self.shell_hook
+                    .as_ref()
+                    .map(|s| s.as_str())
+                    .unwrap_or_default(),
+                command.as_ref()
+            );
 
-            println!("Using init file {}", file_path.display());
-
-            cmd.arg("--rcfile")
-                .arg(file_path.to_str().unwrap_or_default())
+            cmd.arg("-c")
+                .arg(command)
                 .spawn()
                 .context("spawning shell")?
                 .wait()
                 .await
                 .context("wait for output")?
+        } else if let Some(hook) = self.shell_hook.as_ref() {
+            let file = NamedTempFile::new().context("Creating temp file")?;
+            let (mut file, path) = file.keep().context("keeping tempfile")?;
+            file.write_fmt(format_args!("rm -f {}\n", path.display()))
+                .context("writing tempfile")?;
+            file.write_all(hook.as_bytes()).context("writing hook")?;
+            drop(file);
+
+            // Running as an interactive shell
+            let mut child = cmd
+                .arg("--rcfile")
+                .arg(path)
+                .spawn()
+                .context("spawning shell")?;
+
+            child.wait().await.context("wait for output")?
         } else {
             cmd.spawn()
                 .context("spawning shell")?
