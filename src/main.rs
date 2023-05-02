@@ -6,6 +6,7 @@ use crate::model::{ProjectDesc, ProjectEnvironment};
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
 
+mod direnv;
 mod init;
 mod model;
 mod run;
@@ -21,7 +22,7 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[clap(short, default_value = "homebrewer.toml")]
+    #[clap(short, default_value = "devit.toml")]
     /// Use this TOML
     path_to_toml: PathBuf,
 }
@@ -50,6 +51,9 @@ enum Commands {
     /// Install the necessary dependencies
     Install,
 
+    /// Print commands for direnv to set up the environment
+    Direnv,
+
     /// Print out the project information in json format
     Info,
 }
@@ -74,7 +78,10 @@ async fn read_project(toml_file: impl AsRef<Path>) -> anyhow::Result<ProjectEnvi
     project
         .to_environment(
             project_dir.to_str().context("path to dir")?,
-            project_dir.join(".hb-state").to_str().unwrap_or_default(),
+            project_dir
+                .join(".devit-state")
+                .to_str()
+                .unwrap_or_default(),
         )
         .await
         .context("environment")
@@ -143,5 +150,14 @@ async fn main() -> anyhow::Result<()> {
                 .context("reading project file")?,
         )
         .context("writing json"),
+
+        Commands::Direnv => {
+            direnv::print_direnv_commands(
+                &read_project(&path_to_toml)
+                    .await
+                    .context("reading project file")?,
+            )
+            .await
+        }
     }
 }

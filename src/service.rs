@@ -89,6 +89,7 @@ impl ProjectEnvironment {
             .run_command("sh", true)
             .arg("-c")
             .arg(&service.script)
+            .envs(service.environ.iter())
             .current_dir(&service.working_directory)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -132,6 +133,7 @@ impl ProjectEnvironment {
 
             Ok(status) => {
                 println!("{name} exited with status {status:?}");
+                let _ = child.kill().await;
                 let _ = log_monitor.abort();
                 return status.context("waiting for termination");
             }

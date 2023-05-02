@@ -34,8 +34,15 @@ pub fn init_project(path_to_toml: impl AsRef<Path>) -> anyhow::Result<()> {
             .open(&gitignore)
             .context("unable to create .gitignore")?;
 
-        file.write_all(b"\n/.hb-state")
+        file.write_all(b"\n/.devit-state")
             .context("unable to write to .gitignore")?;
+    }
+
+    // Create .envrc file
+    let envrc = project_dir.join(".envrc");
+    if !envrc.is_file() {
+        let mut file = File::create(&envrc).context("unable to create .envrc")?;
+        file.write_all(b"direnv_load devit direnv\n")?;
     }
 
     // Create default project file at path_to_toml
@@ -58,5 +65,5 @@ fn has_initialised_gitignore(gitignore: impl AsRef<Path>) -> bool {
         Err(_) => return false,
     }
 
-    file_contents.contains("/.hb-state")
+    file_contents.contains("/.devit-state")
 }
